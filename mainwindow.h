@@ -20,6 +20,8 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
+#include <QPair>
+#include <QList>
 
 //using namespace QtCharts;
 
@@ -36,7 +38,9 @@ public:
     ~MainWindow();
     void activateFunctions();
     void deactivateFunctions();
-    void showImage(QImage, const QString &caption = QString());
+    void showImage(QImage, const QString &caption = QString(), const QSize &maxSize = QSize(280, 260));
+    void displayResults(const QList<QPair<QString, QImage>> &outputs);
+    void runSelectedOperation();
     void clearResults();
     void showHistogramChart(const QString &title, const QString &setName, const int *data);
 
@@ -46,6 +50,7 @@ private:
     noise* smooth;
     histogram* Histogram;
     QImage image;
+    QImage currentResult;         // result on screen; this is what "Save image" writes
     morphological* morpho;
     QScrollArea* resultArea;      // results strip inside this window
     QHBoxLayout* resultLayout;    // holds one label per result image

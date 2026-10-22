@@ -1,5 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include <QMessageBox>
+#include <QFileInfo>
 
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
@@ -22,7 +24,8 @@ MainWindow::MainWindow(QWidget *parent) :
     resultArea->setWidget(resultContainer);
 
     deactivateFunctions();
-    connect(ui->pushButtonLoadImage,SIGNAL(released()),this,SLOT(loadImage()));
+    // (Load button is wired automatically to on_pushButtonLoadImage_clicked; the old
+    //  connect() to a non-existent loadImage() slot only printed a warning.)
 }
 
 MainWindow::~MainWindow()
@@ -41,233 +44,193 @@ void MainWindow::on_pushButtonLoadImage_clicked()
            ui->route->setText(filename);
            ui->labelImage->setPixmap(QPixmap::fromImage(copy));
            activateFunctions();
+           clearResults();                                // previous results belong to the old image
+           currentResult = QImage();
+           ui->pushButtonSaveImage->setEnabled(false);
        }
     }
 }
 
+// Qt pads every image row to a multiple of 4 bytes. The morphological code indexes pixels
+// as x + y * width, which is only valid when the width is a multiple of 4, so pad the
+// image on the right (repeating the last column) and crop the result afterwards.
+static QImage padForLinearAccess(const QImage &gray)
+{
+    const int w = gray.width();
+    const int w4 = (w + 3) / 4 * 4;
+    if (w4 == w) return gray;
+
+    QImage out(w4, gray.height(), QImage::Format_Grayscale8);
+    for (int y = 0; y < gray.height(); y++) {
+        const uchar* src = gray.constScanLine(y);
+        uchar* dst = out.scanLine(y);
+        memcpy(dst, src, w);
+        for (int x = w; x < w4; x++) dst[x] = src[w - 1];
+    }
+    return out;
+}
+
+// Runs the operation selected in the radio buttons on the loaded image, shows the
+// result(s) in the results strip and remembers the main result for "Save image".
+void MainWindow::runSelectedOperation()
+{
+    if (image.isNull()) return;
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+
+    QList<QPair<QString, QImage>> outputs;   // everything shown in the results strip
+    QImage result;                           // what "Save image" will write
+    const int w = image.width();
+    const int h = image.height();
+
+    if (ui->radioButtonRGBtoHSL->isChecked()) {
+        transform->RGBtoHSL(image);
+        result = transform->getHSLImage();
+        outputs << qMakePair(QString("Red"), transform->getRedImage())
+                << qMakePair(QString("Green"), transform->getGreenImage())
+                << qMakePair(QString("Blue"), transform->getBlueImage())
+                << qMakePair(QString("HSL"), result);
+    }
+    else if (ui->radioButtonRGBtoHSV->isChecked()) {
+        transform->RGBtoHSV(image);
+        result = transform->getHSVImage();
+        outputs << qMakePair(QString("Red"), transform->getRedImage())
+                << qMakePair(QString("Green"), transform->getGreenImage())
+                << qMakePair(QString("Blue"), transform->getBlueImage())
+                << qMakePair(QString("HSV"), result);
+    }
+    else if (ui->radioButtonMeanFilter->isChecked()) {
+        smooth->smoothing(MEAN, image);
+        result = smooth->getDenoisingImage();
+        outputs << qMakePair(QString("Mean filter"), result);
+    }
+    else if (ui->radioButtonMedianFilter->isChecked()) {
+        smooth->smoothing(MEDIAN, image);
+        result = smooth->getDenoisingImage();
+        outputs << qMakePair(QString("Median filter"), result);
+    }
+    else if (ui->radioButtonGaussianFilter->isChecked()) {
+        smooth->smoothing(GAUSSIAN, image);
+        result = smooth->getDenoisingImage();
+        outputs << qMakePair(QString("Gaussian filter"), result);
+    }
+    else if (ui->radioButtonEqualize->isChecked()) {
+        Histogram->equalizeHistogram(image);
+        result = Histogram->getEqualizedImage();
+        outputs << qMakePair(QString("Equalized"), result);
+    }
+    else if (ui->radioButtonIsodata->isChecked()) {
+        int thres = Histogram->calculateThreshold(ISODATA, image);
+        Histogram->thresholding(thres, image);
+        result = Histogram->getThresholdedImage();
+        outputs << qMakePair(QString("Isodata (threshold %1)").arg(thres), result);
+    }
+    else if (ui->radioButtonOtsu->isChecked()) {
+        int thres = Histogram->calculateThreshold(OTSU, image);
+        Histogram->thresholding(thres, image);
+        result = Histogram->getThresholdedImage();
+        outputs << qMakePair(QString("Otsu (threshold %1)").arg(thres), result);
+    }
+    else {
+        // Morphological operations: all work on a local grayscale copy so the loaded
+        // image is never modified.
+        const QImage g = padForLinearAccess(image.convertToFormat(QImage::Format_Grayscale8));
+        QString caption;
+
+        // binary images: threshold at 127 first
+        auto binaryPrepare = [&]() {
+            morpho->thresholding(127, g);
+            morpho->saveImage(morpho->getThresholdedImage());
+        };
+
+        if (ui->radioButtonErosion->isChecked()) {
+            caption = "Binary erosion";
+            binaryPrepare();
+            morpho->morpho(g, EROSION);
+        }
+        else if (ui->radioButtonDilate->isChecked()) {
+            caption = "Binary dilation";
+            binaryPrepare();
+            morpho->morpho(g, DILATE);
+        }
+        else if (ui->radioButtonOpening->isChecked()) {
+            caption = "Binary opening";
+            binaryPrepare();
+            morpho->morpho(g, DILATE);
+            morpho->saveImage(morpho->getMorpologicalImage());
+            morpho->morpho(g, EROSION);
+        }
+        else if (ui->radioButtonClosing->isChecked()) {
+            caption = "Binary closing";
+            binaryPrepare();
+            morpho->morpho(g, EROSION);
+            morpho->saveImage(morpho->getMorpologicalImage());
+            morpho->morpho(g, DILATE);
+        }
+        else if (ui->radioButtonGSErosion->isChecked()) {
+            caption = "Grayscale erosion";
+            morpho->saveImage(g);
+            morpho->morpho(g, GSEROSION);
+        }
+        else if (ui->radioButtonGSDilate->isChecked()) {
+            caption = "Grayscale dilation";
+            morpho->saveImage(g);
+            morpho->morpho(g, GSDILATE);
+        }
+        else if (ui->radioButtonGSOpening->isChecked()) {
+            caption = "Grayscale opening";
+            morpho->saveImage(g);
+            morpho->morpho(g, GSDILATE);
+            morpho->saveImage(morpho->getMorpologicalImage());
+            morpho->morpho(g, GSEROSION);
+        }
+        else if (ui->radioButtonGSClosing->isChecked()) {
+            caption = "Grayscale closing";
+            morpho->saveImage(g);
+            morpho->morpho(g, GSEROSION);
+            morpho->saveImage(morpho->getMorpologicalImage());
+            morpho->morpho(g, GSDILATE);
+        }
+        else if (ui->radioButtonGSGradient->isChecked()) {
+            caption = "Gradient";
+            morpho->saveImage(g);
+            morpho->morpho(g, GRADIENT);
+        }
+        else if (ui->radioButtonGSTopHat->isChecked()) {
+            caption = "Top hat";
+            morpho->saveImage(g);
+            morpho->morpho(g, GSDILATE);
+            morpho->saveImage(morpho->getMorpologicalImage());
+            morpho->morpho(g, GSEROSION);
+            morpho->saveImage(morpho->getMorpologicalImage());
+            morpho->morpho(g, TOPHAT);
+        }
+
+        if (!caption.isEmpty()) {
+            result = morpho->getMorpologicalImage().copy(0, 0, w, h);   // drop the padding columns
+            outputs << qMakePair(caption, result);
+        }
+    }
+
+    QApplication::restoreOverrideCursor();
+
+    currentResult = result;
+    ui->pushButtonSaveImage->setEnabled(!result.isNull());
+    displayResults(outputs);
+}
+
+// "Save image" now only writes the result that is already on screen.
 void MainWindow::on_pushButtonSaveImage_clicked()
 {
-    clearResults();   // replace previous results instead of stacking them
+    if (currentResult.isNull()) return;
 
-    if(ui->radioButtonRGBtoHSL->isChecked()){
-        transform->RGBtoHSL(image);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = transform->getHSLImage();
-        imageObject.save(imagePath);
-        showImage(transform->getBlueImage(), "Blue");
-        showImage(transform->getGreenImage(), "Green");
-        showImage(transform->getRedImage(), "Red");
-        showImage(imageObject, "HSL");
-    }
+    QString imagePath = QFileDialog::getSaveFileName(this, tr("Save file"), "",
+                                                     tr("PNG (*.png);;JPEG (*.jpg *.jpeg)"));
+    if (imagePath.isEmpty()) return;                       // dialog cancelled
+    if (QFileInfo(imagePath).suffix().isEmpty()) imagePath += ".png";
 
-    if (ui->radioButtonRGBtoHSV->isChecked()) {
-        transform->RGBtoHSV(image);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = transform->getHSVImage();
-        imageObject.save(imagePath);
-        showImage(transform->getBlueImage(), "Blue");
-        showImage(transform->getGreenImage(), "Green");
-        showImage(transform->getRedImage(), "Red");
-        showImage(imageObject, "HSV");
-    }
-
-    if(ui->radioButtonMeanFilter->isChecked()){
-        smooth->smoothing(MEAN,image);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = smooth->getDenoisingImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonMedianFilter->isChecked()){
-        smooth->smoothing(MEDIAN,image);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = smooth->getDenoisingImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonGaussianFilter->isChecked()){
-        smooth->smoothing(GAUSSIAN,image);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = smooth->getDenoisingImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonEqualize->isChecked()){
-        Histogram->equalizeHistogram(image);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = Histogram->getEqualizedImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonIsodata->isChecked()){
-        int thres = Histogram->calculateThreshold(ISODATA,image);
-        printf("%d",thres);
-        Histogram->thresholding(thres,image);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = Histogram->getThresholdedImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonOtsu->isChecked()){
-        int thres = Histogram->calculateThreshold(OTSU,image);
-        Histogram->thresholding(thres,image);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = Histogram->getThresholdedImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonErosion->isChecked()){
-        image = image.convertToFormat(QImage::Format_Grayscale8);
-        morpho->thresholding(127,image);
-        morpho->saveImage(morpho->getThresholdedImage());
-        morpho->morpho(image,EROSION);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonDilate->isChecked()){
-        image = image.convertToFormat(QImage::Format_Grayscale8);
-        morpho->thresholding(127,image);
-        morpho->saveImage(morpho->getThresholdedImage());
-        morpho->morpho(image,DILATE);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonOpening->isChecked()){
-        image = image.convertToFormat(QImage::Format_Grayscale8);
-        morpho->thresholding(127,image);
-        morpho->saveImage(morpho->getThresholdedImage());
-        morpho->morpho(image,DILATE);
-        morpho->saveImage(morpho->getMorpologicalImage());
-        morpho->morpho(image,EROSION);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonClosing->isChecked()){
-        image = image.convertToFormat(QImage::Format_Grayscale8);
-        morpho->thresholding(127,image);
-        morpho->saveImage(morpho->getThresholdedImage());
-        morpho->morpho(image,EROSION);
-        morpho->saveImage(morpho->getMorpologicalImage());
-        morpho->morpho(image,DILATE);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonGSErosion->isChecked()){
-        morpho->saveImage(image);
-        morpho->morpho(image,GSEROSION);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonGSDilate->isChecked()){
-        morpho->saveImage(image);
-        morpho->morpho(image,GSDILATE);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonGSOpening->isChecked()){
-        morpho->saveImage(image);
-        morpho->morpho(image,GSDILATE);
-        morpho->saveImage(morpho->getMorpologicalImage());
-        morpho->morpho(image,GSEROSION);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonGSClosing->isChecked()){
-        morpho->saveImage(image);
-        morpho->morpho(image,GSEROSION);
-        morpho->saveImage(morpho->getMorpologicalImage());
-        morpho->morpho(image,GSDILATE);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
-    }
-
-    if(ui->radioButtonGSGradient->isChecked()){
-        morpho->saveImage(image);
-        morpho->morpho(image,GRADIENT);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        //pixmap = QPixmap::fromImage(imageObject);
-        //ui->label_10->setPixmap(pixmap);
-        showImage(imageObject);
-    }
-    if(ui->radioButtonGSTopHat->isChecked()){
-        image = image.convertToFormat(QImage::Format_Grayscale8);
-        morpho->saveImage(image);
-        morpho->morpho(image,GSDILATE);
-        morpho->saveImage(morpho->getMorpologicalImage());
-        morpho->morpho(image,GSEROSION);
-        morpho->saveImage(morpho->getMorpologicalImage());
-        morpho->morpho(image,TOPHAT);
-        QImage imageObject;
-        QString imagePath = QFileDialog::getSaveFileName(this,tr("Save file"),"",tr("JPEG (*.jpg *.jpeg);;PNG (*.png)" ));
-        imageObject.load(imagePath);
-        imageObject = morpho->getMorpologicalImage();
-        imageObject.save(imagePath);
-        showImage(imageObject);
+    if (!currentResult.save(imagePath)) {
+        QMessageBox::warning(this, tr("Save image"), tr("Could not save the image to:\n%1").arg(imagePath));
     }
 }
 
@@ -327,15 +290,30 @@ void MainWindow::clearResults(){
     }
 }
 
-// Shows the image inside the main window (results strip) instead of a new window
-void MainWindow::showImage(QImage ImageToShow, const QString &caption){
+// Replaces the contents of the results strip with the given (caption, image) pairs,
+// sized so they fit the strip without scrolling where possible.
+void MainWindow::displayResults(const QList<QPair<QString, QImage>> &outputs){
+    clearResults();
+    if (outputs.isEmpty()) return;
+
+    const QSize area = resultArea->viewport()->size();
+    const int n = outputs.size();
+    const int tileW = qMax(120, (area.width() - 20) / n - 10);
+    const int tileH = qMax(120, area.height() - 50);        // leave room for the caption
+    for (const auto &item : outputs) {
+        showImage(item.second, item.first, QSize(tileW, tileH));
+    }
+}
+
+// Adds one image (with optional caption) to the results strip in the main window
+void MainWindow::showImage(QImage ImageToShow, const QString &caption, const QSize &maxSize){
     QWidget* cell = new QWidget();
     QVBoxLayout* cellLayout = new QVBoxLayout(cell);
     cellLayout->setContentsMargins(0, 0, 0, 0);
 
     QLabel* imageLabel = new QLabel();
     imageLabel->setPixmap(QPixmap::fromImage(ImageToShow)
-                          .scaled(280, 260, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                          .scaled(maxSize, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     cellLayout->addWidget(imageLabel);
 
     if (!caption.isEmpty()) {
@@ -348,27 +326,27 @@ void MainWindow::showImage(QImage ImageToShow, const QString &caption){
 
 void MainWindow::on_radioButtonRGBtoHSL_clicked()
 {
-   ui->pushButtonSaveImage->setEnabled(true);
+   runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonRGBtoHSV_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonMeanFilter_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonMedianFilter_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonGaussianFilter_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 // Rebuilds the chart from scratch so repeated clicks never stack series/axes/legends
@@ -418,12 +396,18 @@ void MainWindow::showHistogramChart(const QString &title, const QString &setName
 
 void MainWindow::on_radioButtonHistogram_clicked()
 {
+    clearResults();                                   // chart only: nothing to save
+    currentResult = QImage();
+    ui->pushButtonSaveImage->setEnabled(false);
     Histogram->calculateHistogram(image);
     showHistogramChart("Histogram", "Intensity Pixels", Histogram->getHistogram());
 }
 
 void MainWindow::on_radioButtonEquHistogram_clicked()
 {
+    clearResults();                                   // chart only: nothing to save
+    currentResult = QImage();
+    ui->pushButtonSaveImage->setEnabled(false);
     Histogram->equalizeHistogram(image);
     showHistogramChart("Equalized histogram", "Intensity of equalized pixels", Histogram->getEqualizedHistogram());
 }
@@ -431,65 +415,65 @@ void MainWindow::on_radioButtonEquHistogram_clicked()
 
 void MainWindow::on_radioButtonEqualize_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonIsodata_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonOtsu_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonErosion_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonDilate_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonOpening_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonClosing_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonGSGradient_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonGSTopHat_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonGSErosion_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonGSDilate_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonGSOpening_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }
 
 void MainWindow::on_radioButtonGSClosing_clicked()
 {
-    ui->pushButtonSaveImage->setEnabled(true);
+    runSelectedOperation();
 }

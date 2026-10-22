@@ -24,8 +24,6 @@ public:
     int* getEqualizedHistogram()     {return equalizedHistogram; }
     int* getAccumulatedFrequency()   {return accumulatedFrequency; }
 
-    uchar* originalPixels;
-
     QImage getEqualizedImage(){return qEqualizedImage;}
     QImage getThresholdedImage(){return qThresholdedImage;}
 

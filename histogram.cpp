@@ -6,14 +6,15 @@ histogram::histogram()
 }
 
 void histogram::calculateHistogram(QImage image){
-    // Normalize to 1 byte per pixel — no striding needed
-    QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
-    originalPixels = gray.bits();
-    int imageSize = gray.width() * gray.height();
+    // Keep the grayscale copy as a member: the old code stored a pointer into a local
+    // image that was freed on return, and equalizeHistogram() then read through it.
+    qOriginalImage = image.convertToFormat(QImage::Format_Grayscale8);
     memset(histogramArray, 0, sizeof(histogramArray));
-    for (int pixel = 0; pixel < imageSize; pixel++) {
-        int value =(int)originalPixels[pixel];
-        histogramArray[value]++;
+    for (int y = 0; y < qOriginalImage.height(); y++) {
+        const uchar* line = qOriginalImage.constScanLine(y);   // rows are padded to 4 bytes
+        for (int x = 0; x < qOriginalImage.width(); x++) {
+            histogramArray[line[x]]++;
+        }
     }
 }
 
@@ -28,7 +29,6 @@ void histogram::calculateAccumulatedFrequency(){
 void histogram::equalizeHistogram(QImage image){
 
     qEqualizedImage = QImage(image.width(),image.height(),QImage::Format_Grayscale8);
-    uchar* equalizedPixels = qEqualizedImage.bits();
     memset(equalizedHistogram, 0, sizeof(equalizedHistogram));
     calculateHistogram(image);
     calculateAccumulatedFrequency();
@@ -38,12 +38,14 @@ void histogram::equalizeHistogram(QImage image){
         newValues[value] = (scale * accumulatedFrequency[value]);
     }
 
-    int imageSize = image.width() * image.height();
-
-    for (int pixel = 0; pixel < imageSize; pixel++) {
-        int value = (int)newValues[originalPixels[pixel]];
-        equalizedPixels[pixel]=value;
-        equalizedHistogram[value]++;
+    for (int y = 0; y < qOriginalImage.height(); y++) {
+        const uchar* src = qOriginalImage.constScanLine(y);
+        uchar* dst = qEqualizedImage.scanLine(y);
+        for (int x = 0; x < qOriginalImage.width(); x++) {
+            int value = newValues[src[x]];
+            dst[x] = value;
+            equalizedHistogram[value]++;
+        }
     }
 }
 
@@ -64,13 +66,19 @@ int histogram::calculateThreshold(ThresMethod thres, QImage image){
                 meanF += f * histogramArray[f];
             }
 
-            meanF = meanF/accumulatedFrequency[newT-1];
+            // pixels below / at-or-above the threshold; stop if either side is empty
+            // (the old code divided by zero and indexed [-1] when newT reached 0)
+            int countF = newT > 0 ? accumulatedFrequency[newT-1] : 0;
+            int countB = accumulatedFrequency[255] - countF;
+            if (countF == 0 || countB == 0) break;
+
+            meanF = meanF/countF;
 
             for (int b = newT; b < 256; b++) {
                 meanB += b * histogramArray[b];
             }
 
-            meanB = meanB / (accumulatedFrequency[255] - accumulatedFrequency[newT-1]);
+            meanB = meanB / countB;
 
             newT = (meanF + meanB) / 2;
         }
@@ -116,14 +124,14 @@ int histogram::calculateThreshold(ThresMethod thres, QImage image){
 }
 
 void histogram::thresholding(int threshold,QImage image){
-    qThresholdedImage = QImage(image.width(), image.height(), image.format());
     QImage gray = image.convertToFormat(QImage::Format_Grayscale8);
-    uchar* originalPixels = gray.bits();
-    uchar* thresholdedPixels = qThresholdedImage.bits();
+    qThresholdedImage = QImage(gray.width(), gray.height(), QImage::Format_Grayscale8);
 
-    int imageSize = gray.width() * gray.height();
-
-    for (int pixel = 0; pixel < imageSize; pixel++) {
-        thresholdedPixels[pixel]=originalPixels[pixel]<threshold ? 0:255;
+    for (int y = 0; y < gray.height(); y++) {
+        const uchar* src = gray.constScanLine(y);
+        uchar* dst = qThresholdedImage.scanLine(y);
+        for (int x = 0; x < gray.width(); x++) {
+            dst[x] = src[x] < threshold ? 0 : 255;
+        }
     }
 }

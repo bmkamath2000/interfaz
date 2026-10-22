@@ -417,16 +417,61 @@ void MainWindow::showHistogramChart(const int* data, const QString& seriesName, 
     window.raise();
 }
 
+// Rebuilds the chart from scratch so repeated clicks never stack series/axes/legends
+void MainWindow::showHistogramChart(const QString &title, const QString &setName, const int *data)
+{
+    chart->removeAllSeries();
+    const QList<QAbstractAxis*> oldAxes = chart->axes();
+    for (QAbstractAxis* a : oldAxes) {
+        chart->removeAxis(a);
+        delete a;
+    }
+
+    QBarSet* set = new QBarSet(setName);
+    QStringList categories;
+    int maxValue = 0;
+    for (int i = 0; i < 256; i++) {
+        set->append(data[i]);
+        categories.append(QString::number(i));
+        if (data[i] > maxValue) maxValue = data[i];
+    }
+
+    QBarSeries* series = new QBarSeries();
+    series->setBarWidth(1.0);
+    series->append(set);
+    chart->addSeries(series);
+    chart->setTitle(title);
+    chart->setAnimationOptions(QChart::NoAnimation);
+
+    QBarCategoryAxis* axisX = new QBarCategoryAxis();
+    axisX->append(categories);
+    axisX->setLabelsAngle(-90);
+    chart->addAxis(axisX, Qt::AlignBottom);
+    series->attachAxis(axisX);
+
+    QValueAxis* axisY = new QValueAxis();
+    axisY->setRange(0, maxValue);
+    axisY->applyNiceNumbers();
+    chart->addAxis(axisY, Qt::AlignLeft);
+    series->attachAxis(axisY);
+
+    chartView->setRenderHint(QPainter::Antialiasing);
+    window.setCentralWidget(chartView);
+    window.resize(900, 400);
+    window.show();
+    window.raise();
+}
+
 void MainWindow::on_radioButtonHistogram_clicked()
 {
     Histogram->calculateHistogram(image);
-    showHistogramChart(Histogram->getHistogram(), "Intensity Pixels", "Histogram");
+    showHistogramChart("Histogram", "Intensity Pixels", Histogram->getHistogram());
 }
 
 void MainWindow::on_radioButtonEquHistogram_clicked()
 {
     Histogram->equalizeHistogram(image);
-    showHistogramChart(Histogram->getEqualizedHistogram(), "Intensity of equalized pixels", "Equalized histogram");
+    showHistogramChart("Equalized histogram", "Intensity of equalized pixels", Histogram->getEqualizedHistogram());
 }
 
 

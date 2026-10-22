@@ -16,7 +16,10 @@
 #include <QBarSeries>
 #include <QBarSet>
 #include <QChartView>
-
+#include <QScrollArea>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
+#include <QLabel>
 
 //using namespace QtCharts;
 
@@ -33,7 +36,9 @@ public:
     ~MainWindow();
     void activateFunctions();
     void deactivateFunctions();
-    void showImage(QImage);
+    void showImage(QImage, const QString &caption = QString());
+    void clearResults();
+    void showHistogramChart(const int* data, const QString& seriesName, const QString& title);
 
 private:
     Ui::MainWindow *ui;
@@ -42,11 +47,9 @@ private:
     histogram* Histogram;
     QImage image;
     morphological* morpho;
-    QGraphicsScene* scene;
-    QGraphicsView* view;
-    QGraphicsPixmapItem* item;
+    QScrollArea* resultArea;      // results strip inside this window
+    QHBoxLayout* resultLayout;    // holds one label per result image
     QChart *chart = new QChart();
-    QBarCategoryAxis *axis = new QBarCategoryAxis();
     QChartView *chartView = new QChartView(chart);
     QMainWindow window;
     QPixmap pixmap;

@@ -371,52 +371,6 @@ void MainWindow::on_radioButtonGaussianFilter_clicked()
     ui->pushButtonSaveImage->setEnabled(true);
 }
 
-// Rebuilds the chart from scratch so repeated clicks (or alternating between
-// the two histogram buttons) never accumulate series, axes or legend entries.
-void MainWindow::showHistogramChart(const int* data, const QString& seriesName, const QString& title)
-{
-    // removeAllSeries() deletes the old series and their bar sets
-    chart->removeAllSeries();
-    // Axes created by createDefaultAxes() are not deleted by the chart: remove and delete them
-    const auto oldAxes = chart->axes();
-    for (QAbstractAxis* oldAxis : oldAxes) {
-        chart->removeAxis(oldAxis);
-        delete oldAxis;
-    }
-
-    QBarSet* set = new QBarSet(seriesName);
-    QStringList categories;
-    for (int i = 0; i < 256; i++) {
-        categories.append(QString::number(i));   // note: "" + i was pointer arithmetic, not a string
-        set->append(data[i]);
-    }
-
-    QBarSeries* series = new QBarSeries();
-    series->setBarWidth(1.0);                    // bars touch: easier to read with 256 bins
-    series->append(set);
-
-    chart->addSeries(series);
-    chart->setTitle(title);
-    chart->setAnimationOptions(QChart::SeriesAnimations);
-    chart->createDefaultAxes();
-
-    // Put the intensity labels on the x axis created by createDefaultAxes()
-    const auto xAxes = chart->axes(Qt::Horizontal, series);
-    if (!xAxes.isEmpty()) {
-        QBarCategoryAxis* xAxis = qobject_cast<QBarCategoryAxis*>(xAxes.first());
-        if (xAxis) {
-            xAxis->append(categories);
-            xAxis->setLabelsAngle(-90);
-        }
-    }
-
-    chartView->setRenderHint(QPainter::Antialiasing);
-    window.setCentralWidget(chartView);
-    window.resize(420,300);
-    window.show();
-    window.raise();
-}
-
 // Rebuilds the chart from scratch so repeated clicks never stack series/axes/legends
 void MainWindow::showHistogramChart(const QString &title, const QString &setName, const int *data)
 {

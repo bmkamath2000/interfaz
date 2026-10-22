@@ -39,7 +39,6 @@ public:
     void showImage(QImage, const QString &caption = QString());
     void clearResults();
     void showHistogramChart(const QString &title, const QString &setName, const int *data);
-    void showHistogramChart(const int* data, const QString& seriesName, const QString& title);
 
 private:
     Ui::MainWindow *ui;
